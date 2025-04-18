@@ -1764,3 +1764,23 @@ fn test_install_from_stdin() {
     assert!(at.file_exists(target));
     assert_eq!(at.read(target), test_string);
 }
+
+#[test]
+fn test_install_failing_treat_as_file() {
+    let scene = TestScenario::new(util_name!());
+    let at = &scene.fixtures;
+    let dir = "dir";
+    let file = "file";
+
+    at.touch(file);
+    at.mkdir(dir);
+    scene
+        .ucmd()
+        .arg("-T")
+        .arg(file)
+        .arg(dir)
+        .fails()
+        .stderr_contains("cannot overwrite directory 'dir' with non-directory");
+
+    assert!(!at.dir_exists("dir/file"));
+}
