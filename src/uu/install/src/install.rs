@@ -50,6 +50,7 @@ pub struct Behavior {
     strip_program: String,
     create_leading: bool,
     target_dir: Option<String>,
+    no_target_dir: bool,
 }
 
 #[derive(Error, Debug)]
@@ -98,6 +99,12 @@ enum InstallError {
 
     #[error("failed to access {}: Not a directory", .0.quote())]
     NotADirectory(PathBuf),
+
+    #[error("cannot overwrite directory {} with non-directory", .0.quote())]
+    OverrideDirectoryFailed(PathBuf),
+
+    #[error("extra operand {}\n{}", .0.quote(), .1.quote())]
+    ExtraOperand(PathBuf, String),
 }
 
 impl UError for InstallError {
@@ -277,7 +284,7 @@ pub fn uu_app() -> Command {
             Arg::new(OPT_NO_TARGET_DIRECTORY)
                 .short('T')
                 .long(OPT_NO_TARGET_DIRECTORY)
-                .help("(unimplemented) treat DEST as a normal file")
+                .help("treat DEST as a normal file")
                 .action(ArgAction::SetTrue),
         )
         .arg(
@@ -322,9 +329,7 @@ pub fn uu_app() -> Command {
 ///
 ///
 fn check_unimplemented(matches: &ArgMatches) -> UResult<()> {
-    if matches.get_flag(OPT_NO_TARGET_DIRECTORY) {
-        Err(InstallError::Unimplemented(String::from("--no-target-directory, -T")).into())
-    } else if matches.get_flag(OPT_PRESERVE_CONTEXT) {
+    if matches.get_flag(OPT_PRESERVE_CONTEXT) {
         Err(InstallError::Unimplemented(String::from("--preserve-context, -P")).into())
     } else if matches.get_flag(OPT_CONTEXT) {
         Err(InstallError::Unimplemented(String::from("--context, -Z")).into())
@@ -362,6 +367,11 @@ fn behavior(matches: &ArgMatches) -> UResult<Behavior> {
 
     let backup_mode = backup_control::determine_backup_mode(matches)?;
     let target_dir = matches.get_one::<String>(OPT_TARGET_DIRECTORY).cloned();
+    let no_target_dir = matches.get_flag(OPT_NO_TARGET_DIRECTORY);
+    if target_dir.is_some() && no_target_dir {
+        show_error!("Options --target-directory and --no-target-directory are mutually exclusive");
+        return Err(1.into());
+    }
 
     let preserve_timestamps = matches.get_flag(OPT_PRESERVE_TIMESTAMPS);
     let compare = matches.get_flag(OPT_COMPARE);
@@ -424,6 +434,7 @@ fn behavior(matches: &ArgMatches) -> UResult<Behavior> {
         ),
         create_leading: matches.get_flag(OPT_CREATE_LEADING),
         target_dir,
+        no_target_dir,
     })
 }
 
@@ -585,9 +596,21 @@ fn standard(mut paths: Vec<String>, b: &Behavior) -> UResult<()> {
         }
     }
 
-    if sources.len() > 1 || is_potential_directory_path(&target) {
-        copy_files_into_dir(sources, &target, b)
+    if sources.len() > 1 {
+        if b.no_target_dir {
+            return Err(
+                InstallError::ExtraOperand(target.to_path_buf(), format_usage(USAGE)).into(),
+            );
+        }
+        return copy_files_into_dir(sources, &target, b);
     } else {
+        if is_potential_directory_path(&target) {
+            if b.no_target_dir {
+                return Err(InstallError::OverrideDirectoryFailed(target.clone()).into());
+            } else {
+                return copy_files_into_dir(sources, &target, b);
+            }
+        }
         let source = sources.first().unwrap();
 
         if source.is_dir() {
