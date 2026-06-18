@@ -293,7 +293,32 @@ impl Source {
                     }
                 }
             }
+            #[cfg(not(unix))]
             Self::File(f) => f.seek(SeekFrom::Current(n.try_into().unwrap())),
+            #[cfg(unix)]
+            Self::File(f) => {
+                let file_len = f.metadata().as_ref().map_or(u64::MAX, Metadata::len);
+                match n.try_into() {
+                    Ok(n) => {
+                        let pos = match f.seek(SeekFrom::Current(n)) {
+                            Ok(pos) => pos,
+                            Err(e) => {
+                                // TODO: insert handle for seek error
+                                return Err(e);
+                            }
+                        };
+                        if file_len > 0 && pos > file_len {
+                            Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid skip"))
+                        } else {
+                            Ok(pos)
+                        }
+                    }
+                    Err(_) => Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("invalid input buffer: {n}"),
+                    )),
+                }
+            }
             #[cfg(unix)]
             Self::Fifo(f) => read_and_discard(f, n, ibs),
         }
@@ -409,7 +434,25 @@ impl<'a> Input<'a> {
 
         let mut src = Source::File(src);
         if settings.skip > 0 {
-            src.skip(settings.skip, settings.ibs)?;
+            match src.skip(settings.skip, settings.ibs) {
+                Ok(_) => {}
+                Err(e)
+                    if e.kind() == io::ErrorKind::InvalidInput
+                        && e.to_string() == "invalid skip" =>
+                {
+                    // GNU compatibility:
+                    // this case prints the stats but sets the exit code to 1
+                    show_error!(
+                        "{}",
+                        translate!("dd-error-cannot-skip-offset", "file" => filename.display())
+                    );
+                    #[cfg(unix)]
+                    set_exit_code(1);
+                }
+                Err(e) => {
+                    return Err(e.into());
+                }
+            }
         }
         Ok(Self { src, settings })
     }
@@ -478,6 +521,19 @@ impl Read for Input<'_> {
                 Ok(len) => return Ok(len),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => (),
                 Err(_) if self.settings.iconv.noerror => return Ok(base_idx),
+                #[cfg(unix)]
+                Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
+                    // GNU compatibility:
+                    // this case prints the stats but sets the exit code to 1
+                    if let Some(infile) = &self.settings.infile {
+                        show_error!(
+                            "{}",
+                            translate!("dd-error-reading-invalid", "file" => infile)
+                        );
+                        set_exit_code(1);
+                    }
+                    return Ok(0);
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -1225,7 +1281,13 @@ fn dd_copy(mut i: Input, o: Output) -> io::Result<()> {
         // best buffer size for reading based on the number of
         // blocks already read and the number of blocks remaining.
         let loop_bsize = calc_loop_bsize(i.settings.count, &rstat, &wstat, i.settings.ibs, bsize);
-        let rstat_update = read_helper(&mut i, &mut buf, loop_bsize)?;
+        let rstat_update = match read_helper(&mut i, &mut buf, loop_bsize) {
+            Ok(stat) => stat,
+            Err(e) => {
+                println!("catch the error: {e:?}");
+                return Err(e);
+            }
+        };
         if rstat_update.is_empty() {
             if input_nocache {
                 i.discard_cache(read_offset, 0);
