@@ -1038,6 +1038,12 @@ impl<'a> Output<'a> {
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => (),
+                Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid input buffer",
+                    ));
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -1297,7 +1303,6 @@ fn dd_copy(mut i: Input, o: Output) -> io::Result<()> {
             }
             break;
         }
-        let wstat_update = o.write_blocks(&buf)?;
 
         // Discard the system file cache for the read portion of
         // the input file.
@@ -1310,6 +1315,34 @@ fn dd_copy(mut i: Input, o: Output) -> io::Result<()> {
             i.discard_cache(offset, len);
         }
         read_offset += read_len;
+
+        // Update the read stats before writing for better error handling
+        rstat += rstat_update;
+
+        // we need to break the loop when encountering an invalid input buffer
+        let wstat_update = match o.write_blocks(&buf) {
+            Ok(wstat) => wstat,
+            Err(e)
+                if e.kind() == io::ErrorKind::InvalidInput
+                    && e.to_string() == "invalid input buffer" =>
+            {
+                // GNU compatibility:
+                // this case prints the stats but sets the exit code to 1
+                if let Some(outfile) = &i.settings.outfile {
+                    show_error!(
+                        "{}",
+                        translate!("dd-error-writing-invalid", "file" => outfile)
+                    );
+                    #[cfg(unix)]
+                    set_exit_code(1);
+                }
+                break;
+            }
+            Err(e) => {
+                show_error!("capture the error: {:?}", e);
+                return Err(e);
+            }
+        };
 
         // Discard the system file cache for the written portion
         // of the output file.
@@ -1329,7 +1362,6 @@ fn dd_copy(mut i: Input, o: Output) -> io::Result<()> {
         // error. Since it is just reporting progress and is not
         // crucial to the operation of `dd`, let's just ignore the
         // error.
-        rstat += rstat_update;
         wstat += wstat_update;
         #[cfg(target_os = "linux")]
         if check_and_reset_sigusr1() {
