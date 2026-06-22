@@ -29,7 +29,7 @@ use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions, hard_link, remove_file};
-use std::io::{self, BufWriter, Read, Result, Write};
+use std::io::{self, BufWriter, Read, Result, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
 #[cfg(unix)]
@@ -1159,6 +1159,15 @@ impl AtPath {
         let file = file.as_ref();
         log_info("touch", self.plus_as_string(file));
         File::create(self.plus(file)).unwrap();
+    }
+
+    pub fn seek<P: AsRef<Path>>(&self, file: P, offset: u64) -> Result<u64> {
+        let file = file.as_ref();
+        let mut opts = OpenOptions::new();
+        opts.write(true);
+        self.touch(self.plus(file));
+        let mut f = opts.open(self.plus(file)).unwrap();
+        f.seek(SeekFrom::Start(offset))
     }
 
     #[cfg(not(windows))]
