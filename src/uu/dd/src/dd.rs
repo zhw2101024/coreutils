@@ -48,8 +48,9 @@ use std::time::{Duration, Instant};
 
 use clap::{Arg, Command};
 use gcd::Gcd;
+use thiserror::Error;
 use uucore::display::Quotable;
-use uucore::error::{FromIo, UResult};
+use uucore::error::{FromIo, UError, UResult};
 #[cfg(unix)]
 use uucore::error::{USimpleError, set_exit_code};
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
@@ -163,6 +164,23 @@ impl Num {
         match self {
             Self::Blocks(n) => n * block_size,
             Self::Bytes(n) => n,
+        }
+    }
+}
+
+#[derive(Error, Debug)]
+enum DdError {
+    #[error("{}", translate!("dd-error-general-io", "error" => _0))]
+    IOError(#[from] io::Error),
+    #[error("unexpedted error")]
+    TryReserveError(io::Error),
+}
+
+impl UError for DdError {
+    fn code(&self) -> i32 {
+        match self {
+            Self::IOError(_) => 1,
+            Self::TryReserveError(_) => 1,
         }
     }
 }
@@ -1112,7 +1130,7 @@ fn flush_caches_full_length(i: &Input, o: &Output) {
 ///
 /// If there is a problem reading from the input or writing to
 /// this output.
-fn dd_copy(mut i: Input, o: Output) -> io::Result<()> {
+fn dd_copy(mut i: Input, o: Output) -> Result<(), DdError> {
     // The read and write statistics.
     //
     // These objects are counters, initialized to zero. After each
@@ -1169,7 +1187,8 @@ fn dd_copy(mut i: Input, o: Output) -> io::Result<()> {
             &prog_tx,
             output_thread,
             truncate,
-        );
+        )
+        .map_err(Into::into);
     }
 
     // Spawn a timer thread to provide a scheduled signal indicating when we
@@ -1210,7 +1229,8 @@ fn dd_copy(mut i: Input, o: Output) -> io::Result<()> {
     // Create a common empty buffer with a capacity of the block size.
     // This is the max size needed.
     let mut buf = Vec::new();
-    buf.try_reserve(bsize)?; // try_with_capacity is unstable https://github.com/rust-lang/rust/issues/91913
+    buf.try_reserve(bsize)
+        .map_err(|e| DdError::TryReserveError(e.into()))?; // try_with_capacity is unstable https://github.com/rust-lang/rust/issues/91913
 
     // The main read/write loop.
     //
@@ -1287,7 +1307,7 @@ fn dd_copy(mut i: Input, o: Output) -> io::Result<()> {
         }
     }
 
-    finalize(o, rstat, wstat, start, &prog_tx, output_thread, truncate)
+    finalize(o, rstat, wstat, start, &prog_tx, output_thread, truncate).map_err(DdError::IOError)
 }
 
 /// Flush output, print final stats, and join with the progress thread.
@@ -1538,7 +1558,11 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         None if is_stdout_redirected_to_seekable_file() => Output::new_file_from_stdout(&settings)?,
         None => Output::new_stdout(&settings)?,
     };
-    dd_copy(i, o).map_err_context(|| translate!("dd-error-io-error"))
+    match dd_copy(i, o) {
+        Ok(_) => Ok(()),
+        Err(DdError::IOError(e)) => Err(e.into()),
+        Err(DdError::TryReserveError(e)) => Err(e).map_err_context(|| "reserve failed".into()),
+    }
 }
 
 pub fn uu_app() -> Command {
