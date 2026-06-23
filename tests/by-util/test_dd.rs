@@ -2129,8 +2129,11 @@ fn test_bs_not_positive() {
     }
 }
 
+/*
+ * it won't fail on macos, so skip this test on ci based on macos.
+ */
 #[test]
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn test_skip_i64_max() {
     let ts = TestScenario::new(util_name!());
     let at = &ts.fixtures;
@@ -2185,8 +2188,11 @@ fn test_skip_i64_max() {
         ));
 }
 
+/*
+ * The FileTooLarge ErrorKind is experimental, so skip this test on ci based on macos and openbsd.
+ */
 #[test]
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "openbsd")))]
 fn test_seek_i64_max_infile_not_empty() {
     let ts = TestScenario::new(util_name!());
     let at = &ts.fixtures;
