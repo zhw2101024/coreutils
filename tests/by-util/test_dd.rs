@@ -2128,3 +2128,40 @@ fn test_bs_not_positive() {
         }
     }
 }
+
+/// Test for skipping beyond the number of bytes in the infile.
+#[test]
+#[cfg(unix)]
+fn test_skip_beyond_infile() {
+    let ts = TestScenario::new(util_name!());
+    let at = &ts.fixtures;
+
+    let infile_name = "infile";
+    at.touch(infile_name);
+    let infile = at.plus(infile_name);
+
+    new_ucmd!()
+        .args(&[
+            format!("if={}", infile.display()).as_str(),
+            "bs=1",
+            "skip=2",
+        ])
+        .succeeds()
+        .no_stdout()
+        .stderr_contains("0+0 records in\n0+0 records out\n");
+
+    at.write(infile_name, "a");
+
+    new_ucmd!()
+        .args(&[
+            format!("if={}", infile.display()).as_str(),
+            "bs=1",
+            "skip=2",
+        ])
+        .succeeds()
+        .no_stdout()
+        .stderr_contains(format!(
+            "{}: cannot skip to specified offset\n0+0 records in\n0+0 records out\n",
+            infile.display()
+        ));
+}

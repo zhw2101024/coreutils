@@ -172,8 +172,10 @@ impl Num {
 enum DdError {
     #[error("{}", translate!("dd-error-general-io", "error" => _0))]
     IOError(#[from] io::Error),
-    #[error("unexpedted error")]
+    #[error("error on reserving capacity: {}", .0)]
     TryReserveError(io::Error),
+    #[error("skip overflow")]
+    SkipOverflow(),
 }
 
 impl UError for DdError {
@@ -181,6 +183,7 @@ impl UError for DdError {
         match self {
             Self::IOError(_) => 1,
             Self::TryReserveError(_) => 1,
+            Self::SkipOverflow() => 1,
         }
     }
 }
@@ -249,7 +252,7 @@ impl Source {
         Self::StdinFile(f)
     }
 
-    fn skip(&mut self, n: u64, ibs: usize) -> io::Result<u64> {
+    fn skip(&mut self, n: u64, ibs: usize) -> Result<u64, DdError> {
         match self {
             #[cfg(not(unix))]
             Self::Stdin(stdin) => {
@@ -311,9 +314,34 @@ impl Source {
                     }
                 }
             }
-            Self::File(f) => f.seek(SeekFrom::Current(n.try_into().unwrap())),
+            #[cfg(not(unix))]
+            Self::File(f) => Ok(f.seek(SeekFrom::Current(n.try_into().unwrap()))?),
             #[cfg(unix)]
-            Self::Fifo(f) => read_and_discard(f, n, ibs),
+            Self::File(f) => {
+                let file_len = f.metadata().as_ref().map_or(u64::MAX, Metadata::len);
+                let skip: i64 = match n.try_into() {
+                    Ok(n) => n,
+                    Err(e) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("seek start offset overflow: {n}, msg: {e:?}"),
+                        )
+                        .into());
+                    }
+                };
+
+                match f.seek(SeekFrom::Current(skip)) {
+                    Ok(offset) => {
+                        if file_len > 0 && offset > file_len {
+                            return Err(DdError::SkipOverflow());
+                        }
+                        Ok(offset)
+                    }
+                    Err(e) => Err(DdError::IOError(e)),
+                }
+            }
+            #[cfg(unix)]
+            Self::Fifo(f) => read_and_discard(f, n, ibs).map_err(DdError::IOError),
         }
     }
 
@@ -427,7 +455,16 @@ impl<'a> Input<'a> {
 
         let mut src = Source::File(src);
         if settings.skip > 0 {
-            src.skip(settings.skip, settings.ibs)?;
+            match src.skip(settings.skip, settings.ibs) {
+                Ok(_) => {}
+                Err(DdError::SkipOverflow()) => {
+                    show_error!(
+                        "{}",
+                        translate!("dd-error-cannot-skip-offset-infile", "file" => filename.display())
+                    );
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
         Ok(Self { src, settings })
     }
@@ -1561,7 +1598,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     match dd_copy(i, o) {
         Ok(_) => Ok(()),
         Err(DdError::IOError(e)) => Err(e.into()),
-        Err(DdError::TryReserveError(e)) => Err(e).map_err_context(|| "reserve failed".into()),
+        Err(e) => Err(e.into()),
     }
 }
 
