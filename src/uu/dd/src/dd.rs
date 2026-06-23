@@ -174,6 +174,7 @@ enum DdError {
     IOError(#[from] io::Error),
     #[error("error on reserving capacity: {}", .0)]
     TryReserveError(io::Error),
+    #[allow(dead_code)]
     #[error("skip overflow")]
     SkipOverflow(),
 }
